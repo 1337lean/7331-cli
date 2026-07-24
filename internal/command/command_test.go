@@ -12,7 +12,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/1337lean/7331-cli/internal/api"
 	"github.com/1337lean/7331-cli/internal/files"
 	"github.com/1337lean/7331-cli/internal/state"
 )
@@ -185,6 +187,28 @@ func TestInvalidFilesFailBeforeNetwork(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("network requests = %d", requests.Load())
+	}
+}
+
+func TestTicketTimeoutIsActionable(t *testing.T) {
+	originalTimeout := api.TicketTimeout
+	api.TicketTimeout = 20 * time.Millisecond
+	defer func() { api.TicketTimeout = originalTimeout }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprint(writer, `{"data":{"ticket":"late"}}`)
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	path := pngFile(t, directory, "image.png")
+	app, _, stderr := testApp(server, filepath.Join(directory, "state"), false, false)
+	code := app.Run([]string{"--server", server.URL, "upload", path, "--no-save"})
+	if code != Failure {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("timeout was not actionable: %s", stderr.String())
 	}
 }
 
