@@ -1,0 +1,100 @@
+version: 2
+
+project_name: 7331
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+builds:
+  - id: 7331
+    main: ./cmd/7331
+    binary: 7331
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X main.version={{ .Tag }}
+        -X main.commit={{ .FullCommit }}
+        -X main.buildDate={{ .Date }}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "7"
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+
+archives:
+  - id: archives
+    ids:
+      - 7331
+    formats:
+      - >-
+        {{- if eq .Os "windows" }}zip
+        {{- else }}tar.gz
+        {{- end }}
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- with .Arm }}v{{ . }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+
+release:
+  github:
+    owner: 1337lean
+    name: 7331-cli
+  prerelease: auto
+
+homebrew_casks:
+  - name: "7331"
+    ids:
+      - archives
+    binaries:
+      - "7331"
+    directory: Casks
+    homepage: https://7331.cloud/cli
+    description: Anonymous image uploads from the command line
+    license: MIT
+    skip_upload: auto
+    repository:
+      owner: 1337lean
+      name: homebrew-tap
+      token: "{{ .Env.PACKAGE_REPOS_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: actions@users.noreply.github.com
+
+scoops:
+  - name: "7331"
+    ids:
+      - archives
+    homepage: https://7331.cloud/cli
+    description: Anonymous image uploads from the command line
+    license: MIT
+    skip_upload: auto
+    repository:
+      owner: 1337lean
+      name: scoop-bucket
+      token: "{{ .Env.PACKAGE_REPOS_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: actions@users.noreply.github.com
