@@ -72,3 +72,19 @@ func TestValidateRejectsOversizedFile(t *testing.T) {
 		t.Fatal("expected oversized file to fail")
 	}
 }
+
+func TestValidateRejectsSymlinks(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target.png")
+	link := filepath.Join(directory, "link.png")
+	if err := os.WriteFile(target, []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Validate([]string{link}); err == nil {
+		t.Fatal("expected symlink to fail regular-file validation")
+	}
+}

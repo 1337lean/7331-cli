@@ -35,7 +35,7 @@ func Validate(paths []string) ([]File, error) {
 }
 
 func validate(path string) (File, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return File{}, err
 	}
