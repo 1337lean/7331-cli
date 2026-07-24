@@ -90,6 +90,14 @@ Anonymous CLI uploads are governed by the 7331.cloud acceptable-use policy and
 share the service's per-IP allowance with browser uploads: 10 authorized images
 and 100 MiB per UTC day.
 
+### Maintainer release setup
+
+The release repository needs a `PACKAGE_REPOS_TOKEN` Actions secret containing
+a fine-grained GitHub token with contents write access only to
+`1337lean/homebrew-tap` and `1337lean/scoop-bucket`. The normal `GITHUB_TOKEN`
+publishes CLI releases. Tags containing a prerelease indicator, such as
+`v0.1.0-rc.1`, intentionally skip both package repositories.
+
 ## License
 
 [MIT](LICENSE)
