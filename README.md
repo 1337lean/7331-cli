@@ -10,7 +10,9 @@ automatic updates.
 Homebrew on macOS or Linux:
 
 ```bash
-brew install --cask 1337lean/tap/7331
+brew tap 1337lean/tap
+brew trust --cask 1337lean/tap/7331
+brew install --cask 7331
 ```
 
 Scoop on Windows:

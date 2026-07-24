@@ -76,6 +76,12 @@ homebrew_casks:
     description: Anonymous image uploads from the command line
     license: MIT
     skip_upload: auto
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/7331"]
+          end
     repository:
       owner: 1337lean
       name: homebrew-tap
