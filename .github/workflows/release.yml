@@ -33,6 +33,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE_REPOS_TOKEN: ${{ secrets.PACKAGE_REPOS_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
       - name: Verify packaged version
         run: |
           verify_dir="$(mktemp -d)"
