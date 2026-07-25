@@ -178,6 +178,11 @@ func (app App) runUpload(server string, args []string) int {
 	if err != nil {
 		return app.invalid(err)
 	}
+	defer func() {
+		for index := range validated {
+			_ = validated[index].Close()
+		}
+	}()
 	client, err := api.New(server, app.Version, app.HTTPClient)
 	if err != nil {
 		return app.invalid(err)

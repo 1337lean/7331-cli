@@ -95,3 +95,28 @@ func TestNewRejectsInsecureNonLoopbackServer(t *testing.T) {
 		t.Fatalf("loopback server should be accepted: %v", err)
 	}
 }
+
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+	var destinationHit bool
+	destination := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		destinationHit = true
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer destination.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	client, err := New(source.URL, "dev", source.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Delete(context.Background(), "abcdefghijklmnopqrst", "deletion-secret"); !IsStatus(err, http.StatusTemporaryRedirect) {
+		t.Fatalf("expected redirect response, got %v", err)
+	}
+	if destinationHit {
+		t.Fatal("redirect destination received deletion capability")
+	}
+}

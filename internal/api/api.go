@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"os"
 	"path"
 	"strings"
 	"time"
@@ -109,10 +108,14 @@ func New(server, version string, client *http.Client) (*Client, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
+	safeClient := *client
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &Client{
 		base:       base,
 		userAgent:  "7331/" + version,
-		httpClient: client,
+		httpClient: &safeClient,
 	}, nil
 }
 
@@ -153,7 +156,7 @@ func (c *Client) Upload(ctx context.Context, file files.File, ticket string) (Up
 	writeDone := make(chan error, 1)
 	go func() {
 		defer close(writeDone)
-		handle, err := os.Open(file.Path)
+		handle, err := file.Open()
 		if err == nil {
 			var part io.Writer
 			disposition := mime.FormatMediaType("form-data", map[string]string{
@@ -165,7 +168,13 @@ func (c *Client) Upload(ctx context.Context, file files.File, ticket string) (Up
 				"Content-Type":        {file.MIMEType},
 			})
 			if err == nil {
-				_, err = io.Copy(part, handle)
+				written, copyErr := io.CopyN(part, handle, file.Size+1)
+				switch {
+				case copyErr != nil && !errors.Is(copyErr, io.EOF):
+					err = copyErr
+				case written != file.Size:
+					err = errors.New("upload file changed size after validation")
+				}
 			}
 			closeErr := handle.Close()
 			if err == nil {

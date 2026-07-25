@@ -1,6 +1,7 @@
 package files
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,5 +87,37 @@ func TestValidateRejectsSymlinks(t *testing.T) {
 	}
 	if _, err := Validate([]string{link}); err == nil {
 		t.Fatal("expected symlink to fail regular-file validation")
+	}
+}
+
+func TestValidatedFileSurvivesPathReplacement(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "image.png")
+	original := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	validated, err := Validate([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer validated[0].Close()
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := validated[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("read replacement content %q", got)
 	}
 }
