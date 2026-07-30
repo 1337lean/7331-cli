@@ -506,9 +506,6 @@ Commands:
   delete   Delete an upload using a saved credential or deletion URL
   info     Fetch public image metadata
   version  Print version information
-
-Environment:
-  7331_SERVER  Override https://7331.cloud for development or self-hosting
 `)
 }
 
