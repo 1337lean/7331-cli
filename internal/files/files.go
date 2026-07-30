@@ -20,22 +20,30 @@ type File struct {
 	handle   *os.File
 }
 
-func Validate(paths []string) ([]File, error) {
+// Invalid describes a path that failed validation. Rejected paths are reported
+// per file so that one bad path does not discard an otherwise valid batch.
+type Invalid struct {
+	Path string
+	Err  error
+}
+
+// Validate opens and checks every path. The returned error covers only batch
+// level problems; individual rejections are returned as Invalid entries.
+func Validate(paths []string) ([]File, []Invalid, error) {
 	if len(paths) < 1 || len(paths) > 5 {
-		return nil, fmt.Errorf("upload requires between one and five files")
+		return nil, nil, fmt.Errorf("upload requires between one and five files")
 	}
 	validated := make([]File, 0, len(paths))
+	var rejected []Invalid
 	for _, path := range paths {
 		file, err := validate(path)
 		if err != nil {
-			for index := range validated {
-				_ = validated[index].Close()
-			}
-			return nil, fmt.Errorf("%s: %w", path, err)
+			rejected = append(rejected, Invalid{Path: path, Err: err})
+			continue
 		}
 		validated = append(validated, file)
 	}
-	return validated, nil
+	return validated, rejected, nil
 }
 
 func validate(path string) (File, error) {

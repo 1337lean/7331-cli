@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"text/tabwriter"
 
 	"github.com/1337lean/7331-cli/internal/api"
 )
@@ -19,6 +20,23 @@ type UploadEnvelope struct {
 	Version int           `json:"version"`
 	Uploads []api.Upload  `json:"uploads"`
 	Errors  []UploadError `json:"errors"`
+}
+
+// ListEntry omits the deletion token by default so that listing saved uploads
+// is not itself a way to leak deletion capabilities.
+type ListEntry struct {
+	PublicID    string `json:"public_id"`
+	Filename    string `json:"filename,omitempty"`
+	URL         string `json:"url"`
+	DetailsURL  string `json:"details_url,omitempty"`
+	DeletionURL string `json:"deletion_url,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+}
+
+type ListEnvelope struct {
+	Version int         `json:"version"`
+	Uploads []ListEntry `json:"uploads"`
 }
 
 type DeleteResult struct {
@@ -56,6 +74,25 @@ func InfoInteractive(writer io.Writer, metadata api.Metadata) {
 	fmt.Fprintf(writer, "Animated %t\n", metadata.Animated)
 	fmt.Fprintf(writer, "Created  %s\n", metadata.CreatedAt)
 	fmt.Fprintf(writer, "Expires  %s\n", metadata.ExpiresAt)
+}
+
+func ListInteractive(writer io.Writer, entries []ListEntry) {
+	table := tabwriter.NewWriter(writer, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "PUBLIC ID\tFILENAME\tEXPIRES\tURL")
+	for _, entry := range entries {
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", entry.PublicID, dash(entry.Filename), dash(entry.ExpiresAt), entry.URL)
+		if entry.DeletionURL != "" {
+			fmt.Fprintf(table, "\t\t\t%s\n", entry.DeletionURL)
+		}
+	}
+	_ = table.Flush()
+}
+
+func dash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func RequestID(err error) string {

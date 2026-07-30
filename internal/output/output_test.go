@@ -9,6 +9,30 @@ import (
 	"github.com/1337lean/7331-cli/internal/api"
 )
 
+func TestListInteractiveGolden(t *testing.T) {
+	t.Parallel()
+	var actual bytes.Buffer
+	ListInteractive(&actual, []ListEntry{
+		{
+			PublicID:  "public_identifier_0001",
+			Filename:  "one.png",
+			URL:       "https://i.7331.cloud/one.png",
+			ExpiresAt: "2026-07-31T00:00:00Z",
+		},
+		{
+			PublicID: "public_identifier_0002",
+			URL:      "https://i.7331.cloud/two.png",
+		},
+	})
+	expected, err := os.ReadFile(filepath.Join("testdata", "list_interactive.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual.String() != string(expected) {
+		t.Fatalf("output mismatch\n--- got ---\n%s--- want ---\n%s", actual.String(), expected)
+	}
+}
+
 func TestUploadInteractiveGolden(t *testing.T) {
 	t.Parallel()
 	upload := api.Upload{

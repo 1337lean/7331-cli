@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
+	"time"
 )
 
 var publicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{20,}$`)
@@ -151,6 +153,72 @@ func (s *Store) Load(publicID string) (Record, error) {
 	return record, nil
 }
 
+// List returns every readable record, newest first. Unreadable or foreign files
+// in the state directory are skipped rather than failing the whole listing.
+func (s *Store) List() ([]Record, error) {
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read state directory: %w", err)
+	}
+	records := make([]Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		record, err := s.Load(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil {
+			continue
+		}
+		records = append(records, record)
+	}
+	sort.SliceStable(records, func(first, second int) bool {
+		firstTime, firstOK := ParseTimestamp(records[first].CreatedAt)
+		secondTime, secondOK := ParseTimestamp(records[second].CreatedAt)
+		if firstOK && secondOK && !firstTime.Equal(secondTime) {
+			return firstTime.After(secondTime)
+		}
+		return records[first].PublicID < records[second].PublicID
+	})
+	return records, nil
+}
+
+// Prune removes records whose upload has already expired. Records without a
+// parsable expiry are kept, so a server format change cannot silently destroy
+// deletion credentials.
+func (s *Store) Prune(now time.Time) (int, error) {
+	records, err := s.List()
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, record := range records {
+		expires, ok := ParseTimestamp(record.ExpiresAt)
+		if !ok || !expires.Before(now) {
+			continue
+		}
+		if err := s.Remove(record.PublicID); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// ParseTimestamp reads a service timestamp, reporting whether it was usable.
+func ParseTimestamp(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
 func (s *Store) Remove(publicID string) error {
 	target, err := s.path(publicID)
 	if err != nil {
@@ -165,6 +233,18 @@ func (s *Store) Remove(publicID string) error {
 type Reference struct {
 	PublicID string
 	Token    string
+	// Host and Scheme record where the reference was read from. Both are empty
+	// for a bare public ID.
+	Host   string
+	Scheme string
+}
+
+// Origin reports the service the reference came from, empty for a bare ID.
+func (r Reference) Origin() string {
+	if r.Host == "" {
+		return ""
+	}
+	return r.Scheme + "://" + r.Host
 }
 
 func ParseReference(value string) (Reference, error) {
@@ -193,7 +273,7 @@ func ParseReference(value string) (Reference, error) {
 	if values, err := url.ParseQuery(parsed.Fragment); err == nil {
 		token = values.Get("token")
 	}
-	return Reference{PublicID: last, Token: token}, nil
+	return Reference{PublicID: last, Token: token, Host: parsed.Host, Scheme: parsed.Scheme}, nil
 }
 
 func DeletionToken(deletionURL string) (string, error) {

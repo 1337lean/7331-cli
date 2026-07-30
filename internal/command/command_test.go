@@ -16,6 +16,7 @@ import (
 
 	"github.com/1337lean/7331-cli/internal/api"
 	"github.com/1337lean/7331-cli/internal/files"
+	"github.com/1337lean/7331-cli/internal/output"
 	"github.com/1337lean/7331-cli/internal/state"
 )
 
@@ -272,12 +273,14 @@ func TestTicketTimeoutIsActionable(t *testing.T) {
 func TestDeleteByIDAndURL(t *testing.T) {
 	id := "public_identifier_0001"
 	for _, test := range []struct {
-		name  string
-		value string
+		name string
+		// value is built from the live test server so that the deletion URL
+		// originates from the host the request is sent to.
+		value func(serverURL string) string
 		save  bool
 	}{
-		{"saved ID", id, true},
-		{"deletion URL", "https://7331.cloud/d/" + id + "#token=url-secret", false},
+		{"saved ID", func(string) string { return id }, true},
+		{"deletion URL", func(serverURL string) string { return serverURL + "/d/" + id + "#token=url-secret" }, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var gotPath, gotToken string
@@ -300,7 +303,7 @@ func TestDeleteByIDAndURL(t *testing.T) {
 				}
 			}
 			app, stdout, stderr := testApp(server, root, false, false)
-			code := app.Run([]string{"--server", server.URL, "delete", test.value, "--yes", "--json"})
+			code := app.Run([]string{"--server", server.URL, "delete", test.value(server.URL), "--yes", "--json"})
 			if code != Success {
 				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 			}
@@ -361,6 +364,214 @@ func TestDeleteNoninteractiveRequiresYes(t *testing.T) {
 	app, _, _ := testApp(server, filepath.Join(t.TempDir(), "state"), false, false)
 	if code := app.Run([]string{"--server", server.URL, "delete", "public_identifier_0001"}); code != InvalidInput {
 		t.Fatalf("code = %d", code)
+	}
+}
+
+func TestDeleteRefusesForeignDeletionURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		t.Error("token must not be sent to a server that did not issue it")
+	}))
+	defer server.Close()
+	app, _, stderr := testApp(server, filepath.Join(t.TempDir(), "state"), false, false)
+	value := "https://elsewhere.example/d/public_identifier_0001#token=leaked"
+	if code := app.Run([]string{"--server", server.URL, "delete", value, "--yes"}); code != InvalidInput {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "elsewhere.example") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestVersionFlagMatchesSubcommand(t *testing.T) {
+	for _, args := range [][]string{{"version"}, {"--version"}, {"-v"}} {
+		var stdout, stderr bytes.Buffer
+		app := App{Stdout: &stdout, Stderr: &stderr, Version: "1.2.3"}
+		if code := app.Run(args); code != Success {
+			t.Fatalf("%v: code = %d, stderr = %s", args, code, stderr.String())
+		}
+		if strings.TrimSpace(stdout.String()) != "7331 1.2.3" {
+			t.Fatalf("%v: stdout = %q", args, stdout.String())
+		}
+	}
+}
+
+func TestServerEnvironmentOverridePrefersShellSettableName(t *testing.T) {
+	// A shell identifier cannot begin with a digit, so _7331_SERVER is the
+	// name users can actually export.
+	t.Setenv("_7331_SERVER", "https://underscore.example")
+	t.Setenv("7331_SERVER", "https://digit.example")
+	if got := serverFromEnvironment(); got != "https://underscore.example" {
+		t.Fatalf("server = %q", got)
+	}
+	t.Setenv("_7331_SERVER", "")
+	if got := serverFromEnvironment(); got != "https://digit.example" {
+		t.Fatalf("fallback server = %q", got)
+	}
+}
+
+func TestUploadRejectsFileLargerThanServerLimit(t *testing.T) {
+	var uploads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/v1/images" {
+			uploads.Add(1)
+			return
+		}
+		fmt.Fprint(writer, `{"data":{"ticket":"t","expires_in":300,"max_bytes":4}}`)
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	path := pngFile(t, directory, "image.png")
+	app, _, stderr := testApp(server, filepath.Join(directory, "state"), false, false)
+	if code := app.Run([]string{"--server", server.URL, "upload", path}); code != Failure {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if uploads.Load() != 0 {
+		t.Fatalf("uploaded %d files past the server limit", uploads.Load())
+	}
+	if !strings.Contains(stderr.String(), "server accepts at most 4") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestUploadContinuesPastUnreadableFile(t *testing.T) {
+	server, uploads := uploadServer(t, 0)
+	defer server.Close()
+	directory := t.TempDir()
+	good := pngFile(t, directory, "good.png")
+	missing := filepath.Join(directory, "absent.png")
+	app, stdout, stderr := testApp(server, filepath.Join(directory, "state"), false, false)
+
+	code := app.Run([]string{"--server", server.URL, "upload", missing, good})
+	if code != Failure {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if uploads.Load() != 1 {
+		t.Fatalf("uploads = %d, want the valid file to still be sent", uploads.Load())
+	}
+	if !strings.Contains(stdout.String(), "https://i.test/public_identifier_0001.png") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), missing) {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestUploadWithOnlyInvalidFilesSkipsNetwork(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	app, _, stderr := testApp(server, filepath.Join(directory, "state"), false, false)
+	code := app.Run([]string{"--server", server.URL, "upload", filepath.Join(directory, "absent.png")})
+	if code != InvalidInput {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("network requests = %d", requests.Load())
+	}
+}
+
+func TestListShowsSavedUploadsAndHidesTokens(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := state.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := state.Record{
+		PublicID:      "public_identifier_0001",
+		DeletionToken: "must-not-be-listed",
+		URL:           "https://i.test/live.png",
+		DeletionURL:   "https://test/d/public_identifier_0001#token=must-not-be-listed",
+		Filename:      "live.png",
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt:     time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}
+	expired := state.Record{
+		PublicID:      "public_identifier_0002",
+		DeletionToken: "stale",
+		URL:           "https://i.test/expired.png",
+		Filename:      "expired.png",
+		CreatedAt:     "2020-01-01T00:00:00Z",
+		ExpiresAt:     "2020-01-02T00:00:00Z",
+	}
+	for _, record := range []state.Record{live, expired} {
+		if err := store.Save(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	app, stdout, stderr := testApp(httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), root, true, false)
+	if code := app.Run([]string{"list"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "live.png") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "must-not-be-listed") {
+		t.Fatalf("list exposed a deletion token:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "expired.png") {
+		t.Fatalf("list showed an expired upload:\n%s", stdout.String())
+	}
+	if _, err := store.Load(expired.PublicID); err == nil {
+		t.Fatal("expired record was not pruned from disk")
+	}
+	if _, err := store.Load(live.PublicID); err != nil {
+		t.Fatalf("live record was pruned: %v", err)
+	}
+}
+
+func TestListJSONIncludesDeletionURLOnlyOnRequest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := state.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(state.Record{
+		PublicID:      "public_identifier_0001",
+		DeletionToken: "secret",
+		URL:           "https://i.test/one.png",
+		DeletionURL:   "https://test/d/public_identifier_0001#token=secret",
+		ExpiresAt:     time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"list", "--json"}, false},
+		{[]string{"list", "--json", "--show-delete-url"}, true},
+	} {
+		app, stdout, stderr := testApp(httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), root, false, false)
+		if code := app.Run(test.args); code != Success {
+			t.Fatalf("%v: code = %d, stderr = %s", test.args, code, stderr.String())
+		}
+		var envelope output.ListEnvelope
+		if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+			t.Fatalf("%v: %v\n%s", test.args, err, stdout.String())
+		}
+		if envelope.Version != 1 || len(envelope.Uploads) != 1 {
+			t.Fatalf("%v: envelope = %#v", test.args, envelope)
+		}
+		if got := envelope.Uploads[0].DeletionURL != ""; got != test.want {
+			t.Fatalf("%v: deletion URL present = %t, want %t", test.args, got, test.want)
+		}
+	}
+}
+
+func TestListWithoutRecordsSucceeds(t *testing.T) {
+	app, stdout, stderr := testApp(httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), filepath.Join(t.TempDir(), "state"), true, false)
+	if code := app.Run([]string{"list"}); code != Success {
+		t.Fatalf("code = %d", code)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want the empty listing on stderr", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "No saved uploads.") {
+		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
 

@@ -28,9 +28,9 @@ func TestValidateDetectsMagicBytes(t *testing.T) {
 			if err := os.WriteFile(path, test.data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			result, err := Validate([]string{path})
-			if err != nil {
-				t.Fatal(err)
+			result, rejected, err := Validate([]string{path})
+			if err != nil || len(rejected) != 0 {
+				t.Fatalf("err = %v, rejected = %v", err, rejected)
 			}
 			if result[0].MIMEType != test.mime {
 				t.Fatalf("got %q, want %q", result[0].MIMEType, test.mime)
@@ -45,14 +45,35 @@ func TestValidateRejectsUnsupportedAndWrongCounts(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not an image"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Validate([]string{path}); err == nil {
-		t.Fatal("expected unsupported image to fail")
+	valid, rejected, err := Validate([]string{path})
+	if err != nil || len(valid) != 0 || len(rejected) != 1 {
+		t.Fatalf("expected unsupported image to be rejected: %v %v %v", valid, rejected, err)
 	}
-	if _, err := Validate(nil); err == nil {
+	if _, _, err := Validate(nil); err == nil {
 		t.Fatal("expected zero files to fail")
 	}
-	if _, err := Validate([]string{"1", "2", "3", "4", "5", "6"}); err == nil {
+	if _, _, err := Validate([]string{"1", "2", "3", "4", "5", "6"}); err == nil {
 		t.Fatal("expected six files to fail before stat calls")
+	}
+}
+
+func TestValidateKeepsGoodFilesAlongsideRejections(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	good := filepath.Join(directory, "good.png")
+	if err := os.WriteFile(good, []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid, rejected, err := Validate([]string{good, filepath.Join(directory, "absent.png")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer valid[0].Close()
+	if len(valid) != 1 || valid[0].Path != good {
+		t.Fatalf("valid = %#v", valid)
+	}
+	if len(rejected) != 1 || rejected[0].Err == nil {
+		t.Fatalf("rejected = %#v", rejected)
 	}
 }
 
@@ -69,8 +90,8 @@ func TestValidateRejectsOversizedFile(t *testing.T) {
 	if err := handle.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Validate([]string{path}); err == nil {
-		t.Fatal("expected oversized file to fail")
+	if _, rejected, err := Validate([]string{path}); err != nil || len(rejected) != 1 {
+		t.Fatalf("expected oversized file to be rejected: %v %v", rejected, err)
 	}
 }
 
@@ -85,8 +106,8 @@ func TestValidateRejectsSymlinks(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, err := Validate([]string{link}); err == nil {
-		t.Fatal("expected symlink to fail regular-file validation")
+	if _, rejected, err := Validate([]string{link}); err != nil || len(rejected) != 1 {
+		t.Fatalf("expected symlink to fail regular-file validation: %v %v", rejected, err)
 	}
 }
 
@@ -98,7 +119,7 @@ func TestValidatedFileSurvivesPathReplacement(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	validated, err := Validate([]string{path})
+	validated, _, err := Validate([]string{path})
 	if err != nil {
 		t.Fatal(err)
 	}

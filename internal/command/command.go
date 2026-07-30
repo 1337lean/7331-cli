@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/1337lean/7331-cli/internal/api"
@@ -43,7 +45,7 @@ func (app App) Run(args []string) int {
 		return app.invalid(err)
 	}
 	if server == "" {
-		server = os.Getenv("7331_SERVER")
+		server = serverFromEnvironment()
 	}
 	if server == "" {
 		server = "https://7331.cloud"
@@ -56,7 +58,7 @@ func (app App) Run(args []string) int {
 	case "help", "--help", "-h":
 		app.printHelp()
 		return Success
-	case "version":
+	case "version", "--version", "-v":
 		return app.runVersion(remaining[1:])
 	case "upload":
 		return app.runUpload(server, remaining[1:])
@@ -64,9 +66,21 @@ func (app App) Run(args []string) int {
 		return app.runDelete(server, remaining[1:])
 	case "info":
 		return app.runInfo(server, remaining[1:])
+	case "list":
+		return app.runList(remaining[1:])
 	default:
 		return app.invalid(fmt.Errorf("unknown command %q", remaining[0]))
 	}
+}
+
+// serverFromEnvironment prefers _7331_SERVER because a shell identifier cannot
+// begin with a digit: 7331_SERVER can only be set through env(1), so it is kept
+// as a compatible fallback rather than the documented name.
+func serverFromEnvironment() string {
+	if server := os.Getenv("_7331_SERVER"); server != "" {
+		return server
+	}
+	return os.Getenv("7331_SERVER")
 }
 
 func globalServer(args []string) (string, []string, error) {
@@ -192,7 +206,7 @@ func (app App) runUpload(server string, args []string) int {
 			return app.invalid(err)
 		}
 	}
-	validated, err := files.Validate(options.paths)
+	validated, rejected, err := files.Validate(options.paths)
 	if err != nil {
 		return app.invalid(err)
 	}
@@ -201,57 +215,30 @@ func (app App) runUpload(server string, args []string) int {
 			_ = validated[index].Close()
 		}
 	}()
-	client, err := api.New(server, app.Version, app.HTTPClient)
-	if err != nil {
-		return app.invalid(err)
-	}
-	var store *state.Store
-	if !options.noSave {
-		store, err = state.New(app.StateRoot)
-		if err != nil {
-			fmt.Fprintf(app.Stderr, "7331: %v\n", err)
-			return Failure
-		}
-	}
 
 	uploads := make([]api.Upload, 0, len(validated))
-	failures := make([]output.UploadError, 0)
-	for _, file := range validated {
-		ticketContext, cancelTicket := context.WithTimeout(context.Background(), api.TicketTimeout)
-		ticket, ticketErr := client.Ticket(ticketContext, file, retention)
-		cancelTicket()
-		if ticketErr != nil {
-			app.uploadFailure(file.Path, ticketErr, &failures)
-			continue
-		}
-		uploadContext, cancelUpload := context.WithTimeout(context.Background(), api.UploadTimeout)
-		uploaded, uploadErr := client.Upload(uploadContext, file, ticket.Ticket)
-		cancelUpload()
-		if uploadErr != nil {
-			app.uploadFailure(file.Path, uploadErr, &failures)
-			continue
-		}
-		uploaded.Source = file.Path
-		uploads = append(uploads, uploaded)
+	failures := make([]output.UploadError, 0, len(rejected))
+	for _, item := range rejected {
+		app.uploadFailure(item.Path, item.Err, &failures)
+	}
 
-		if store != nil {
-			token, tokenErr := state.DeletionToken(uploaded.DeletionURL)
-			if tokenErr == nil {
-				tokenErr = store.Save(state.Record{
-					PublicID:      uploaded.PublicID,
-					DeletionToken: token,
-					URL:           uploaded.URL,
-					DetailsURL:    uploaded.DetailsURL,
-					DeletionURL:   uploaded.DeletionURL,
-					Filename:      file.Filename,
-					CreatedAt:     uploaded.CreatedAt,
-					ExpiresAt:     uploaded.ExpiresAt,
-				})
+	if len(validated) > 0 {
+		client, clientErr := api.New(server, app.Version, app.HTTPClient)
+		if clientErr != nil {
+			return app.invalid(clientErr)
+		}
+		var store *state.Store
+		if !options.noSave {
+			store, err = state.New(app.StateRoot)
+			if err != nil {
+				fmt.Fprintf(app.Stderr, "7331: %v\n", err)
+				return Failure
 			}
-			if tokenErr != nil {
-				app.uploadFailure(file.Path, fmt.Errorf("save deletion credential: %w", tokenErr), &failures)
+			if _, pruneErr := store.Prune(time.Now()); pruneErr != nil {
+				fmt.Fprintf(app.Stderr, "7331: prune expired deletion credentials: %v\n", pruneErr)
 			}
 		}
+		app.uploadAll(client, store, validated, retention, &uploads, &failures)
 	}
 
 	if options.json {
@@ -275,10 +262,59 @@ func (app App) runUpload(server string, args []string) int {
 			output.UploadInteractive(app.Stdout, upload, options.showDeleteURL || options.noSave)
 		}
 	}
+	if len(validated) == 0 {
+		fmt.Fprintln(app.Stderr, "Run '7331 help' for usage.")
+		return InvalidInput
+	}
 	if len(failures) > 0 {
 		return Failure
 	}
 	return Success
+}
+
+func (app App) uploadAll(client *api.Client, store *state.Store, validated []files.File, retention int, uploads *[]api.Upload, failures *[]output.UploadError) {
+	for _, file := range validated {
+		ticketContext, cancelTicket := context.WithTimeout(context.Background(), api.TicketTimeout)
+		ticket, ticketErr := client.Ticket(ticketContext, file, retention)
+		cancelTicket()
+		if ticketErr != nil {
+			app.uploadFailure(file.Path, ticketErr, failures)
+			continue
+		}
+		// The service is authoritative on the size limit; the local check in
+		// files.Validate only avoids obviously wasted requests.
+		if ticket.MaxBytes > 0 && file.Size > ticket.MaxBytes {
+			app.uploadFailure(file.Path, fmt.Errorf("file is %d bytes and the server accepts at most %d", file.Size, ticket.MaxBytes), failures)
+			continue
+		}
+		uploadContext, cancelUpload := context.WithTimeout(context.Background(), api.UploadTimeout)
+		uploaded, uploadErr := client.Upload(uploadContext, file, ticket.Ticket)
+		cancelUpload()
+		if uploadErr != nil {
+			app.uploadFailure(file.Path, uploadErr, failures)
+			continue
+		}
+		*uploads = append(*uploads, uploaded)
+
+		if store != nil {
+			token, tokenErr := state.DeletionToken(uploaded.DeletionURL)
+			if tokenErr == nil {
+				tokenErr = store.Save(state.Record{
+					PublicID:      uploaded.PublicID,
+					DeletionToken: token,
+					URL:           uploaded.URL,
+					DetailsURL:    uploaded.DetailsURL,
+					DeletionURL:   uploaded.DeletionURL,
+					Filename:      file.Filename,
+					CreatedAt:     uploaded.CreatedAt,
+					ExpiresAt:     uploaded.ExpiresAt,
+				})
+			}
+			if tokenErr != nil {
+				app.uploadFailure(file.Path, fmt.Errorf("save deletion credential: %w", tokenErr), failures)
+			}
+		}
+	}
 }
 
 // parseDroppedPaths handles the path text inserted by terminal emulators when
@@ -420,6 +456,13 @@ func (app App) runDelete(server string, args []string) int {
 	if err != nil {
 		return app.invalid(err)
 	}
+	// A deletion URL carries a capability. Sending it to a host other than the
+	// one that issued it would hand the credential to an unrelated service.
+	if reference.Token != "" && reference.Host != "" && !sameHost(reference.Host, server) {
+		return app.invalid(fmt.Errorf(
+			"deletion URL was issued by %s but the configured server is %s; pass --server %s to delete it there",
+			reference.Host, server, reference.Origin()))
+	}
 	store, err := state.New(app.StateRoot)
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "7331: %v\n", err)
@@ -477,6 +520,14 @@ func (app App) runDelete(server string, args []string) int {
 		fmt.Fprintf(app.Stdout, "Deleted %s.\n", reference.PublicID)
 	}
 	return Success
+}
+
+func sameHost(host, server string) bool {
+	parsed, err := url.Parse(server)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(host, parsed.Host)
 }
 
 type infoOptions struct {
@@ -552,6 +603,81 @@ func (app App) runInfo(server string, args []string) int {
 	return Success
 }
 
+type listOptions struct {
+	json          bool
+	showDeleteURL bool
+	help          bool
+}
+
+func parseList(args []string) (listOptions, error) {
+	var options listOptions
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			options.json = true
+		case "--show-delete-url":
+			options.showDeleteURL = true
+		case "--help", "-h":
+			options.help = true
+		default:
+			return options, fmt.Errorf("unknown list argument %q", arg)
+		}
+	}
+	return options, nil
+}
+
+func (app App) runList(args []string) int {
+	options, err := parseList(args)
+	if err != nil {
+		return app.invalid(err)
+	}
+	if options.help {
+		app.printListHelp()
+		return Success
+	}
+	store, err := state.New(app.StateRoot)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "7331: %v\n", err)
+		return Failure
+	}
+	if _, err := store.Prune(time.Now()); err != nil {
+		fmt.Fprintf(app.Stderr, "7331: prune expired deletion credentials: %v\n", err)
+	}
+	records, err := store.List()
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "7331: %v\n", err)
+		return Failure
+	}
+	entries := make([]output.ListEntry, 0, len(records))
+	for _, record := range records {
+		entry := output.ListEntry{
+			PublicID:   record.PublicID,
+			Filename:   record.Filename,
+			URL:        record.URL,
+			DetailsURL: record.DetailsURL,
+			CreatedAt:  record.CreatedAt,
+			ExpiresAt:  record.ExpiresAt,
+		}
+		if options.showDeleteURL {
+			entry.DeletionURL = record.DeletionURL
+		}
+		entries = append(entries, entry)
+	}
+	if options.json {
+		if err := output.JSON(app.Stdout, output.ListEnvelope{Version: 1, Uploads: entries}); err != nil {
+			fmt.Fprintf(app.Stderr, "7331: write output: %v\n", err)
+			return Failure
+		}
+		return Success
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(app.Stderr, "No saved uploads.")
+		return Success
+	}
+	output.ListInteractive(app.Stdout, entries)
+	return Success
+}
+
 func (app App) runVersion(args []string) int {
 	if len(args) > 0 {
 		if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -588,6 +714,7 @@ Usage:
   7331 [--server URL] upload [FILE...] [flags]
   7331 [--server URL] delete PUBLIC_ID|DELETION_URL [--yes] [--json]
   7331 [--server URL] info PUBLIC_ID|URL [--json]
+  7331 list [--json]
   7331 version
   7331 help
 
@@ -595,6 +722,7 @@ Commands:
   upload   Upload one to five JPEG, PNG, WebP, or GIF images
   delete   Delete an upload using a saved credential or deletion URL
   info     Fetch public image metadata
+  list     List uploads with a saved deletion credential
   version  Print version information
 
 Run '7331 <command> --help' for command-specific flags.
@@ -627,5 +755,17 @@ Flags:
 
 func (app App) printInfoHelp() {
 	fmt.Fprint(app.Stdout, `Usage: 7331 info PUBLIC_ID|URL [--json]
+`)
+}
+
+func (app App) printListHelp() {
+	fmt.Fprint(app.Stdout, `Usage: 7331 list [flags]
+
+Lists uploads whose deletion credential is saved on this machine. Records for
+uploads that have expired are removed automatically.
+
+Flags:
+  --json              Print a stable JSON envelope
+  --show-delete-url   Include the deletion capability URL
 `)
 }

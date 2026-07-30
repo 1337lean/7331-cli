@@ -125,10 +125,10 @@ func isLoopback(host string) bool {
 }
 
 func (c *Client) endpoint(parts ...string) string {
-	copy := *c.base
-	joined := append([]string{copy.Path}, parts...)
-	copy.Path = path.Join(joined...)
-	return copy.String()
+	target := *c.base
+	joined := append([]string{target.Path}, parts...)
+	target.Path = path.Join(joined...)
+	return target.String()
 }
 
 func (c *Client) Ticket(ctx context.Context, file files.File, retentionSeconds int) (Ticket, error) {
@@ -241,7 +241,9 @@ func (c *Client) Info(ctx context.Context, publicID string) (Metadata, error) {
 	if err := decodeJSON(response.Body, &envelope); err != nil {
 		return Metadata{}, fmt.Errorf("decode info response: %w", err)
 	}
-	envelope.Data.DetailsURL = strings.TrimRight(c.base.String(), "/") + "/f/" + publicID
+	if envelope.Data.DetailsURL == "" {
+		envelope.Data.DetailsURL = strings.TrimRight(c.base.String(), "/") + "/f/" + publicID
+	}
 	return envelope.Data, nil
 }
 
