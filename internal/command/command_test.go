@@ -88,6 +88,18 @@ func uploadServer(t *testing.T, failTicket int) (*httptest.Server, *atomic.Int32
 	return server, &uploads
 }
 
+func TestHelpPointsToCommandHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if code := app.Run([]string{"help"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	const hint = "Run '7331 <command> --help' for command-specific flags."
+	if !strings.Contains(stdout.String(), hint) {
+		t.Fatalf("help does not contain %q:\n%s", hint, stdout.String())
+	}
+}
+
 func TestUploadOneAndFiveFiles(t *testing.T) {
 	for _, count := range []int{1, 5} {
 		t.Run(fmt.Sprintf("%d files", count), func(t *testing.T) {

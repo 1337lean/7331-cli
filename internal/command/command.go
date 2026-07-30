@@ -506,6 +506,8 @@ Commands:
   delete   Delete an upload using a saved credential or deletion URL
   info     Fetch public image metadata
   version  Print version information
+
+Run '7331 <command> --help' for command-specific flags.
 `)
 }
 
