@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
+	"unicode"
 
 	"github.com/1337lean/7331-cli/internal/api"
 	"github.com/1337lean/7331-cli/internal/files"
@@ -174,6 +176,22 @@ func (app App) runUpload(server string, args []string) int {
 	if !ok {
 		return app.invalid(errors.New("--expires must be one of 5m, 10m, 30m, 1h, 6h, 12h, or 24h"))
 	}
+	if len(options.paths) == 0 {
+		if !app.StdinTTY {
+			return app.invalid(errors.New("upload requires at least one file when stdin is noninteractive"))
+		}
+		fmt.Fprintln(app.Stderr, "Drag and drop one to five images here, then press Enter:")
+		fmt.Fprint(app.Stderr, "> ")
+		line, readErr := bufio.NewReader(app.Stdin).ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			fmt.Fprintf(app.Stderr, "7331: read file paths: %v\n", readErr)
+			return Failure
+		}
+		options.paths, err = parseDroppedPaths(line)
+		if err != nil {
+			return app.invalid(err)
+		}
+	}
 	validated, err := files.Validate(options.paths)
 	if err != nil {
 		return app.invalid(err)
@@ -261,6 +279,78 @@ func (app App) runUpload(server string, args []string) int {
 		return Failure
 	}
 	return Success
+}
+
+// parseDroppedPaths handles the path text inserted by terminal emulators when
+// files are dropped into an active prompt. Unix terminals commonly shell-escape
+// paths, while Windows terminals commonly wrap paths containing spaces in
+// double quotes.
+func parseDroppedPaths(line string) ([]string, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, errors.New("no files were provided")
+	}
+
+	var paths []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	started := false
+	flush := func() {
+		if started {
+			paths = append(paths, current.String())
+			current.Reset()
+			started = false
+		}
+	}
+
+	for _, character := range line {
+		if escaped {
+			current.WriteRune(character)
+			escaped = false
+			started = true
+			continue
+		}
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+				continue
+			}
+			if character == '\\' && runtime.GOOS != "windows" && quote == '"' {
+				escaped = true
+				continue
+			}
+			current.WriteRune(character)
+			started = true
+			continue
+		}
+
+		switch {
+		case character == '\\' && runtime.GOOS != "windows":
+			escaped = true
+			started = true
+		case character == '\'' || character == '"':
+			quote = character
+			started = true
+		case unicode.IsSpace(character):
+			flush()
+		default:
+			current.WriteRune(character)
+			started = true
+		}
+	}
+
+	if escaped {
+		return nil, errors.New("dropped file path ends with an incomplete escape")
+	}
+	if quote != 0 {
+		return nil, errors.New("dropped file path has an unclosed quote")
+	}
+	flush()
+	if len(paths) == 0 {
+		return nil, errors.New("no files were provided")
+	}
+	return paths, nil
 }
 
 func (app App) uploadFailure(source string, err error, failures *[]output.UploadError) {
@@ -495,7 +585,7 @@ func (app App) printHelp() {
 	fmt.Fprint(app.Stdout, `7331 uploads and manages anonymous images on 7331.cloud.
 
 Usage:
-  7331 [--server URL] upload FILE... [flags]
+  7331 [--server URL] upload [FILE...] [flags]
   7331 [--server URL] delete PUBLIC_ID|DELETION_URL [--yes] [--json]
   7331 [--server URL] info PUBLIC_ID|URL [--json]
   7331 version
@@ -512,7 +602,10 @@ Run '7331 <command> --help' for command-specific flags.
 }
 
 func (app App) printUploadHelp() {
-	fmt.Fprint(app.Stdout, `Usage: 7331 upload FILE... [flags]
+	fmt.Fprint(app.Stdout, `Usage: 7331 upload [FILE...] [flags]
+
+With no FILE arguments, an interactive terminal prompts you to drag and drop
+one to five images.
 
 Flags:
   --expires DURATION    5m, 10m, 30m, 1h, 6h, 12h, or 24h (default 24h)

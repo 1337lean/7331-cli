@@ -124,6 +124,51 @@ func TestUploadOneAndFiveFiles(t *testing.T) {
 	}
 }
 
+func TestUploadPromptsForDroppedFile(t *testing.T) {
+	server, uploads := uploadServer(t, 0)
+	defer server.Close()
+	directory := t.TempDir()
+	path := pngFile(t, directory, "image with spaces.png")
+	app, stdout, stderr := testApp(server, filepath.Join(directory, "state"), false, true)
+	app.Stdin = strings.NewReader(strings.ReplaceAll(path, " ", `\ `) + "\n")
+
+	if code := app.Run([]string{"--server", server.URL, "upload", "--no-save"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if uploads.Load() != 1 {
+		t.Fatalf("uploads = %d, want 1", uploads.Load())
+	}
+	if !strings.Contains(stderr.String(), "Drag and drop one to five images here") {
+		t.Fatalf("prompt missing from stderr: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "https://i.test/public_identifier_0001.png") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestUploadWithoutFilesDoesNotReadNoninteractiveStdin(t *testing.T) {
+	server, _ := uploadServer(t, 0)
+	defer server.Close()
+	app, _, stderr := testApp(server, filepath.Join(t.TempDir(), "state"), false, false)
+	if code := app.Run([]string{"--server", server.URL, "upload"}); code != InvalidInput {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "upload requires at least one file when stdin is noninteractive") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestParseDroppedPaths(t *testing.T) {
+	paths, err := parseDroppedPaths(`/tmp/one\ image.png '/tmp/two image.jpg' "/tmp/three image.gif"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/tmp/one image.png", "/tmp/two image.jpg", "/tmp/three image.gif"}
+	if fmt.Sprint(paths) != fmt.Sprint(want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
 func TestUploadInteractiveNoSaveShowsDeletionURL(t *testing.T) {
 	server, _ := uploadServer(t, 0)
 	defer server.Close()

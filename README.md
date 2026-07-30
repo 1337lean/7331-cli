@@ -34,6 +34,7 @@ Versioned archives and SHA-256 checksums are available on
 ## Use
 
 ```bash
+7331 upload
 7331 upload image.png
 7331 upload one.png two.jpg --expires 1h
 7331 upload image.png --url-only
@@ -50,6 +51,10 @@ Versioned archives and SHA-256 checksums are available on
 Upload accepts one to five files of at most 25 MiB each. Retention can be `5m`,
 `10m`, `30m`, `1h`, `6h`, `12h`, or `24h`; the default is `24h`. File type is
 detected from the image bytes, not its extension.
+
+When `7331 upload` is run without file arguments in an interactive terminal,
+it prompts you to drag and drop one to five images into the terminal and press
+Enter. The terminal inserts their paths; the CLI then uploads them normally.
 
 When stdout is piped, `upload` prints one direct URL per successful upload.
 Status and failures go to stderr, and a partially successful batch exits with
