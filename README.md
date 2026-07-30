@@ -31,7 +31,7 @@ go install github.com/1337lean/7331-cli/cmd/7331@latest
 Direct download on macOS or Linux, which needs no package manager:
 
 ```bash
-VERSION=0.1.0
+VERSION=0.2.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 curl -fsSL "https://github.com/1337lean/7331-cli/releases/download/v${VERSION}/7331_${VERSION}_${OS}_${ARCH}.tar.gz" | tar -xz 7331
@@ -65,6 +65,8 @@ the direct download above needs no extra step.
 7331 upload one.png two.jpg --expires 1h
 7331 upload image.png --url-only
 7331 upload image.png --json
+7331 upload image.png --show-delete-url
+7331 upload image.png --no-save
 
 7331 info PUBLIC_ID
 7331 info https://i.7331.cloud/PUBLIC_ID.png --json
@@ -75,6 +77,7 @@ the direct download above needs no extra step.
 
 7331 list
 7331 list --json
+7331 list --show-delete-url
 
 7331 version
 ```
@@ -105,10 +108,14 @@ versioned envelope intended for scripts.
 Each upload returns a capability credential that can permanently delete it.
 Unless `--no-save` is used, `7331` stores one owner-only JSON record per upload
 in the platform state directory. A public ID passed to `7331 delete` uses that
-saved credential. A complete deletion URL can be used on another machine; its
-fragment is parsed locally and is never included in the HTTP request URL. A
-deletion URL is refused when its host is not the server being contacted, so a
-credential is never handed to a service that did not issue it.
+saved credential. Because `--no-save` keeps no local record, it prints the
+deletion URL so the capability is not lost; `--show-delete-url` prints it
+without disabling the local record.
+
+A complete deletion URL can be used on another machine; its fragment is parsed
+locally and is never included in the HTTP request URL. A deletion URL is refused
+when its host is not the server being contacted, so a credential is never handed
+to a service that did not issue it.
 
 `7331 list` shows the uploads this machine can still delete. Records for
 uploads that have already expired are removed automatically by `list` and by
@@ -122,8 +129,9 @@ scripts that other users can read.
 
 ## Development
 
-The module targets Go 1.25 source compatibility. Releases and CI use Go 1.26.5.
-The CLI uses only the standard library.
+The module targets Go 1.25 source compatibility. CI tests against Go 1.25.12
+and 1.26.5; releases build with Go 1.26.5. The CLI uses only the standard
+library.
 
 ```bash
 go fmt ./...
