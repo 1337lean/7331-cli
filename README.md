@@ -31,9 +31,9 @@ go install github.com/1337lean/7331-cli/cmd/7331@latest
 Direct download on macOS or Linux, which needs no package manager:
 
 ```bash
-VERSION=0.2.0
+VERSION=0.3.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/; s/armv7l/armv7/')
 curl -fsSL "https://github.com/1337lean/7331-cli/releases/download/v${VERSION}/7331_${VERSION}_${OS}_${ARCH}.tar.gz" | tar -xz 7331
 sudo install 7331 /usr/local/bin/7331
 ```
@@ -95,6 +95,10 @@ Status and failures go to stderr. Files that cannot be read are reported
 individually and do not cancel the rest of the batch. `--json` emits a
 versioned envelope intended for scripts.
 
+Deletion URLs requested with `--show-delete-url`, or implied by `--no-save`,
+are printed to stderr whenever stdout is not a terminal, so piping a URL list
+never discards the only copy of a deletion capability.
+
 ## Exit codes
 
 | Code | Meaning                                                              |
@@ -112,10 +116,12 @@ saved credential. Because `--no-save` keeps no local record, it prints the
 deletion URL so the capability is not lost; `--show-delete-url` prints it
 without disabling the local record.
 
-A complete deletion URL can be used on another machine; its fragment is parsed
-locally and is never included in the HTTP request URL. A deletion URL is refused
-when its host is not the server being contacted, so a credential is never handed
-to a service that did not issue it.
+A complete deletion URL can be used on another machine; its `#token=` fragment
+is parsed locally and is never included in the HTTP request URL. A deletion URL
+is refused when its scheme and host are not those of the server being
+contacted, so a credential is never handed to a service that did not issue it
+and never leaves over a scheme that did not issue it. Redirects are not
+followed for the same reason.
 
 `7331 list` shows the uploads this machine can still delete. Records for
 uploads that have already expired are removed automatically by `list` and by
@@ -146,10 +152,11 @@ For a local or self-hosted service:
 7331 --server http://127.0.0.1:3000 upload image.png
 ```
 
-`_7331_SERVER` provides the same override. The leading underscore is required
-because a shell identifier cannot begin with a digit; `7331_SERVER` is still
-read for compatibility, but it can only be set through `env(1)`. HTTPS is
-required except for loopback addresses.
+`_7331_SERVER` provides the same override, and `_7331_STATE_DIR` relocates the
+deletion-credential directory. The leading underscore is required because a
+shell identifier cannot begin with a digit; `7331_SERVER` and `7331_STATE_DIR`
+are still read for compatibility, but they can only be set through `env(1)`.
+HTTPS is required except for loopback addresses.
 
 Anonymous CLI uploads are governed by the 7331.cloud acceptable-use policy and
 share the service's per-IP allowance with browser uploads: 10 authorized images

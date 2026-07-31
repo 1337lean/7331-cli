@@ -269,8 +269,12 @@ func ParseReference(value string) (Reference, error) {
 	if !publicIDPattern.MatchString(last) {
 		return Reference{}, errors.New("URL does not contain a valid public ID")
 	}
-	token := parsed.Fragment
-	if values, err := url.ParseQuery(parsed.Fragment); err == nil {
+	// A deletion URL carries its capability as token=VALUE in the fragment. The
+	// escaped fragment is parsed because url.URL.Fragment is already decoded,
+	// and decoding it a second time corrupts any token containing a percent
+	// escape: #token=aa%2Bbb would otherwise yield "aa bb".
+	var token string
+	if values, err := url.ParseQuery(parsed.EscapedFragment()); err == nil {
 		token = values.Get("token")
 	}
 	return Reference{PublicID: last, Token: token, Host: parsed.Host, Scheme: parsed.Scheme}, nil

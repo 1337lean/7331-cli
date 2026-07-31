@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/1337lean/7331-cli/internal/files"
@@ -113,10 +114,16 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Delete(context.Background(), "abcdefghijklmnopqrst", "deletion-secret"); !IsStatus(err, http.StatusTemporaryRedirect) {
+	_, err = client.Delete(context.Background(), "abcdefghijklmnopqrst", "deletion-secret")
+	if !IsStatus(err, http.StatusTemporaryRedirect) {
 		t.Fatalf("expected redirect response, got %v", err)
 	}
 	if destinationHit {
 		t.Fatal("redirect destination received deletion capability")
+	}
+	// A redirect body is not a problem document, so the message has to be built
+	// from the response itself rather than reported as an empty failure.
+	if !strings.Contains(err.Error(), destination.URL) || !strings.Contains(err.Error(), "--server") {
+		t.Fatalf("redirect error is not actionable: %v", err)
 	}
 }

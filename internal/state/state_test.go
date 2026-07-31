@@ -84,6 +84,13 @@ func TestParseReference(t *testing.T) {
 		{"https://7331.cloud/f/" + id, "", "https://7331.cloud"},
 		{"https://7331.cloud/d/" + id + "#token=secret", "secret", "https://7331.cloud"},
 		{"http://127.0.0.1:3000/d/" + id + "#token=secret", "secret", "http://127.0.0.1:3000"},
+		// url.URL.Fragment is already decoded, so the escaped fragment has to
+		// be parsed: decoding twice would turn this token into "aa bb".
+		{"https://7331.cloud/d/" + id + "#token=aa%2Bbb", "aa+bb", "https://7331.cloud"},
+		{"https://7331.cloud/d/" + id + "#token=a%2Fb%3Dc", "a/b=c", "https://7331.cloud"},
+		// Only the documented token=VALUE form is a capability. A bare fragment
+		// is not guessed at, so delete falls back to the saved credential.
+		{"https://7331.cloud/f/" + id + "#preview", "", "https://7331.cloud"},
 	}
 	for _, test := range cases {
 		reference, err := ParseReference(test.value)

@@ -575,6 +575,207 @@ func TestListWithoutRecordsSucceeds(t *testing.T) {
 	}
 }
 
+// A piped or --url-only run keeps stdout a clean URL list, so a deletion
+// capability that was never saved locally has to survive on stderr.
+func TestPipedUploadKeepsUnsavedDeletionURLReachable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"piped and unsaved", []string{"--no-save"}, true},
+		{"piped and requested", []string{"--show-delete-url"}, true},
+		{"piped and saved", nil, false},
+		{"url-only and unsaved", []string{"--url-only", "--no-save"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, _ := uploadServer(t, 0)
+			defer server.Close()
+			directory := t.TempDir()
+			path := pngFile(t, directory, "image.png")
+			app, stdout, stderr := testApp(server, filepath.Join(directory, "state"), false, false)
+
+			args := append([]string{"--server", server.URL, "upload", path}, test.args...)
+			if code := app.Run(args); code != Success {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			const deletionURL = "https://test/d/public_identifier_0001#token=secret-public_identifier_0001"
+			if strings.Contains(stdout.String(), "token") {
+				t.Fatalf("deletion capability leaked into piped stdout:\n%s", stdout.String())
+			}
+			if got := strings.Contains(stderr.String(), deletionURL); got != test.want {
+				t.Fatalf("deletion URL on stderr = %t, want %t\n%s", got, test.want, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "https://i.test/public_identifier_0001.png") {
+				t.Fatalf("stdout = %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestDeleteDeclinedStillEmitsJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("a declined deletion must not reach the network")
+	}))
+	defer server.Close()
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := state.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(state.Record{PublicID: "public_identifier_0001", DeletionToken: "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	app, stdout, stderr := testApp(server, root, false, true)
+	app.Stdin = strings.NewReader("n\n")
+
+	if code := app.Run([]string{"--server", server.URL, "delete", "public_identifier_0001", "--json"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	var result output.DeleteResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("declined deletion produced no JSON: %v\n%q", err, stdout.String())
+	}
+	if result.Deleted || result.PublicID != "public_identifier_0001" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// The host alone is not the origin: a credential issued over HTTPS must not be
+// sent in cleartext to the same host.
+func TestDeleteRefusesDowngradedDeletionURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("token must not be sent over a scheme that did not issue it")
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	app, _, stderr := testApp(server, filepath.Join(t.TempDir(), "state"), false, false)
+
+	value := "https://" + host + "/d/public_identifier_0001#token=leaked"
+	if code := app.Run([]string{"--server", server.URL, "delete", value, "--yes"}); code != InvalidInput {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "https://"+host) {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+// A deletion URL is self-contained, so it has to work on a machine where the
+// state directory cannot be created.
+func TestDeleteByURLSurvivesUnusableStateDirectory(t *testing.T) {
+	var deleted bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		deleted = true
+		fmt.Fprint(writer, `{"data":{"deleted":true}}`)
+	}))
+	defer server.Close()
+
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, _, stderr := testApp(server, filepath.Join(blocked, "state"), false, false)
+	value := server.URL + "/d/public_identifier_0001#token=url-secret"
+	if code := app.Run([]string{"--server", server.URL, "delete", value, "--yes"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !deleted {
+		t.Fatal("deletion URL was not used")
+	}
+	if !strings.Contains(stderr.String(), "continuing with the deletion URL") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestUsageOnFailureGoesToStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if code := app.Run(nil); code != InvalidInput {
+		t.Fatalf("code = %d", code)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("failed run wrote usage to stdout: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage:") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestSeparatorBeforeCommandIsAccepted(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr, Version: "1.2.3"}
+	if code := app.Run([]string{"--", "version"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "7331 1.2.3" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestStateDirectoryEnvironmentOverride(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := state.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(state.Record{
+		PublicID:      "public_identifier_0001",
+		DeletionToken: "secret",
+		URL:           "https://i.test/one.png",
+		Filename:      "one.png",
+		ExpiresAt:     time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("_7331_STATE_DIR", root)
+
+	// StateRoot is left empty so that the environment is what resolves it.
+	app, stdout, stderr := testApp(httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), "", true, false)
+	if code := app.Run([]string{"list"}); code != Success {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "one.png") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestExpiresErrorListsEveryChoice(t *testing.T) {
+	app, _, stderr := testApp(httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), t.TempDir(), false, false)
+	if code := app.Run([]string{"upload", "--expires", "7h", "image.png"}); code != InvalidInput {
+		t.Fatalf("code = %d", code)
+	}
+	for _, choice := range retentionChoices {
+		if !strings.Contains(stderr.String(), choice.name) {
+			t.Fatalf("%s missing from %q", choice.name, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "or 24h") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+// A terminal that never sends a newline must not be read without bound.
+func TestPromptReadsAreBounded(t *testing.T) {
+	server, _ := uploadServer(t, 0)
+	defer server.Close()
+	app, _, stderr := testApp(server, filepath.Join(t.TempDir(), "state"), false, true)
+	app.Stdin = endlessReader{}
+
+	if code := app.Run([]string{"--server", server.URL, "upload"}); code != InvalidInput {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
+// endlessReader models /dev/zero: a character device that never yields a line.
+type endlessReader struct{}
+
+func (endlessReader) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = 'a'
+	}
+	return len(buffer), nil
+}
+
 func TestInfoAcceptsEveryReferenceForm(t *testing.T) {
 	id := "public_identifier_0001"
 	var requests atomic.Int32

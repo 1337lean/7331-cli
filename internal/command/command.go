@@ -50,13 +50,20 @@ func (app App) Run(args []string) int {
 	if server == "" {
 		server = "https://7331.cloud"
 	}
+	// A leading separator only ends global flag parsing; the command name still
+	// follows it, as in `7331 -- upload FILE`.
+	if len(remaining) > 0 && remaining[0] == "--" {
+		remaining = remaining[1:]
+	}
 	if len(remaining) == 0 {
-		app.printHelp()
+		// Usage that accompanies a failure goes to stderr so that a redirected
+		// stdout is not filled with help text on an unsuccessful run.
+		app.printHelp(app.Stderr)
 		return InvalidInput
 	}
 	switch remaining[0] {
 	case "help", "--help", "-h":
-		app.printHelp()
+		app.printHelp(app.Stdout)
 		return Success
 	case "version", "--version", "-v":
 		return app.runVersion(remaining[1:])
@@ -77,10 +84,23 @@ func (app App) Run(args []string) int {
 // begin with a digit: 7331_SERVER can only be set through env(1), so it is kept
 // as a compatible fallback rather than the documented name.
 func serverFromEnvironment() string {
-	if server := os.Getenv("_7331_SERVER"); server != "" {
-		return server
+	return environment("_7331_SERVER", "7331_SERVER")
+}
+
+// stateRoot resolves where deletion credentials are kept. An explicit field
+// wins so that tests and embedders stay isolated from the environment.
+func (app App) stateRoot() string {
+	if app.StateRoot != "" {
+		return app.StateRoot
 	}
-	return os.Getenv("7331_SERVER")
+	return environment("_7331_STATE_DIR", "7331_STATE_DIR")
+}
+
+func environment(preferred, fallback string) string {
+	if value := os.Getenv(preferred); value != "" {
+		return value
+	}
+	return os.Getenv(fallback)
 }
 
 func globalServer(args []string) (string, []string, error) {
@@ -172,9 +192,33 @@ func parseUpload(args []string) (uploadOptions, error) {
 	return options, nil
 }
 
-var retentionSeconds = map[string]int{
-	"5m": 300, "10m": 600, "30m": 1800, "1h": 3600,
-	"6h": 21600, "12h": 43200, "24h": 86400,
+// retentionChoices is ordered so that the map, the help text, and the error
+// message cannot drift apart.
+var retentionChoices = []struct {
+	name    string
+	seconds int
+}{
+	{"5m", 300}, {"10m", 600}, {"30m", 1800}, {"1h", 3600},
+	{"6h", 21600}, {"12h", 43200}, {"24h", 86400},
+}
+
+func retentionFor(name string) (int, bool) {
+	for _, choice := range retentionChoices {
+		if choice.name == name {
+			return choice.seconds, true
+		}
+	}
+	return 0, false
+}
+
+// retentionList renders the choices as prose: "5m, 10m, ..., or 24h".
+func retentionList() string {
+	names := make([]string, 0, len(retentionChoices))
+	for _, choice := range retentionChoices {
+		names = append(names, choice.name)
+	}
+	last := len(names) - 1
+	return strings.Join(names[:last], ", ") + ", or " + names[last]
 }
 
 func (app App) runUpload(server string, args []string) int {
@@ -186,9 +230,9 @@ func (app App) runUpload(server string, args []string) int {
 		app.printUploadHelp()
 		return Success
 	}
-	retention, ok := retentionSeconds[options.retention]
+	retention, ok := retentionFor(options.retention)
 	if !ok {
-		return app.invalid(errors.New("--expires must be one of 5m, 10m, 30m, 1h, 6h, 12h, or 24h"))
+		return app.invalid(fmt.Errorf("--expires must be one of %s", retentionList()))
 	}
 	if len(options.paths) == 0 {
 		if !app.StdinTTY {
@@ -196,7 +240,7 @@ func (app App) runUpload(server string, args []string) int {
 		}
 		fmt.Fprintln(app.Stderr, "Drag and drop one to five images here, then press Enter:")
 		fmt.Fprint(app.Stderr, "> ")
-		line, readErr := bufio.NewReader(app.Stdin).ReadString('\n')
+		line, readErr := readLine(app.Stdin, maxDroppedPathsBytes)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			fmt.Fprintf(app.Stderr, "7331: read file paths: %v\n", readErr)
 			return Failure
@@ -229,7 +273,7 @@ func (app App) runUpload(server string, args []string) int {
 		}
 		var store *state.Store
 		if !options.noSave {
-			store, err = state.New(app.StateRoot)
+			store, err = state.New(app.stateRoot())
 			if err != nil {
 				fmt.Fprintf(app.Stderr, "7331: %v\n", err)
 				return Failure
@@ -253,6 +297,14 @@ func (app App) runUpload(server string, args []string) int {
 	} else if options.urlOnly || !app.StdoutTTY {
 		for _, upload := range uploads {
 			fmt.Fprintln(app.Stdout, upload.URL)
+		}
+		// Without a saved record this output is the only surviving copy of the
+		// deletion capability. It goes to stderr so that a piped list of image
+		// URLs stays machine-readable.
+		if options.noSave || options.showDeleteURL {
+			for _, upload := range uploads {
+				fmt.Fprintf(app.Stderr, "Delete %s\n", upload.DeletionURL)
+			}
 		}
 	} else {
 		for index, upload := range uploads {
@@ -315,6 +367,20 @@ func (app App) uploadAll(client *api.Client, store *state.Store, validated []fil
 			}
 		}
 	}
+}
+
+const (
+	// Five quoted paths are well under 64 KiB, and a confirmation is one word.
+	// The limits keep a prompt bounded when stdin turns out to be an endless
+	// character device such as /dev/zero rather than a terminal.
+	maxDroppedPathsBytes = 64 * 1024
+	maxAnswerBytes       = 1024
+)
+
+// readLine reads one line from an untrusted stream without letting it grow
+// without bound. Input past the limit is reported as a truncated line.
+func readLine(reader io.Reader, limit int64) (string, error) {
+	return bufio.NewReader(io.LimitReader(reader, limit)).ReadString('\n')
 }
 
 // parseDroppedPaths handles the path text inserted by terminal emulators when
@@ -456,19 +522,24 @@ func (app App) runDelete(server string, args []string) int {
 	if err != nil {
 		return app.invalid(err)
 	}
-	// A deletion URL carries a capability. Sending it to a host other than the
-	// one that issued it would hand the credential to an unrelated service.
-	if reference.Token != "" && reference.Host != "" && !sameHost(reference.Host, server) {
+	// A deletion URL carries a capability. Sending it to an origin other than
+	// the one that issued it would hand the credential to an unrelated service.
+	if reference.Token != "" && reference.Host != "" && !sameOrigin(reference, server) {
 		return app.invalid(fmt.Errorf(
 			"deletion URL was issued by %s but the configured server is %s; pass --server %s to delete it there",
-			reference.Host, server, reference.Origin()))
+			reference.Origin(), server, reference.Origin()))
 	}
-	store, err := state.New(app.StateRoot)
-	if err != nil {
-		fmt.Fprintf(app.Stderr, "7331: %v\n", err)
-		return Failure
-	}
+	// A deletion URL is self-contained, so unreadable local state must not stop
+	// it from being used on a machine that never made the upload.
 	token := reference.Token
+	store, storeErr := state.New(app.stateRoot())
+	if storeErr != nil {
+		if token == "" {
+			fmt.Fprintf(app.Stderr, "7331: %v\n", storeErr)
+			return Failure
+		}
+		fmt.Fprintf(app.Stderr, "7331: %v; continuing with the deletion URL\n", storeErr)
+	}
 	if token == "" {
 		record, loadErr := store.Load(reference.PublicID)
 		if loadErr != nil {
@@ -478,7 +549,7 @@ func (app App) runDelete(server string, args []string) int {
 	}
 	if !options.yes {
 		fmt.Fprintf(app.Stderr, "Delete %s? [y/N] ", reference.PublicID)
-		answer, readErr := bufio.NewReader(app.Stdin).ReadString('\n')
+		answer, readErr := readLine(app.Stdin, maxAnswerBytes)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			fmt.Fprintf(app.Stderr, "7331: read confirmation: %v\n", readErr)
 			return Failure
@@ -486,6 +557,14 @@ func (app App) runDelete(server string, args []string) int {
 		answer = strings.TrimSpace(strings.ToLower(answer))
 		if answer != "y" && answer != "yes" {
 			fmt.Fprintln(app.Stderr, "Deletion cancelled.")
+			// A scripted caller must be able to tell a decline from a deletion
+			// rather than reading an empty stdout.
+			if options.json {
+				if err := output.JSON(app.Stdout, output.DeleteResult{PublicID: reference.PublicID}); err != nil {
+					fmt.Fprintf(app.Stderr, "7331: write output: %v\n", err)
+					return Failure
+				}
+			}
 			return Success
 		}
 	}
@@ -500,9 +579,11 @@ func (app App) runDelete(server string, args []string) int {
 		fmt.Fprintf(app.Stderr, "7331: %v\n", err)
 		return Failure
 	}
-	if err := store.Remove(reference.PublicID); err != nil {
-		fmt.Fprintf(app.Stderr, "7331: remove local deletion credential: %v\n", err)
-		return Failure
+	if store != nil {
+		if err := store.Remove(reference.PublicID); err != nil {
+			fmt.Fprintf(app.Stderr, "7331: remove local deletion credential: %v\n", err)
+			return Failure
+		}
 	}
 	result := output.DeleteResult{
 		Deleted:       true,
@@ -522,12 +603,15 @@ func (app App) runDelete(server string, args []string) int {
 	return Success
 }
 
-func sameHost(host, server string) bool {
+// sameOrigin compares scheme and host, so a credential issued over HTTPS is
+// never sent in cleartext to the same host.
+func sameOrigin(reference state.Reference, server string) bool {
 	parsed, err := url.Parse(server)
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(host, parsed.Host)
+	return strings.EqualFold(reference.Host, parsed.Host) &&
+		strings.EqualFold(reference.Scheme, parsed.Scheme)
 }
 
 type infoOptions struct {
@@ -613,6 +697,9 @@ func parseList(args []string) (listOptions, error) {
 	var options listOptions
 	for _, arg := range args {
 		switch arg {
+		case "--":
+			// list takes no operands; the separator is accepted for symmetry
+			// with the other commands.
 		case "--json":
 			options.json = true
 		case "--show-delete-url":
@@ -635,7 +722,7 @@ func (app App) runList(args []string) int {
 		app.printListHelp()
 		return Success
 	}
-	store, err := state.New(app.StateRoot)
+	store, err := state.New(app.stateRoot())
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "7331: %v\n", err)
 		return Failure
@@ -707,14 +794,14 @@ func (app App) invalid(err error) int {
 	return InvalidInput
 }
 
-func (app App) printHelp() {
-	fmt.Fprint(app.Stdout, `7331 uploads and manages anonymous images on 7331.cloud.
+func (app App) printHelp(writer io.Writer) {
+	fmt.Fprint(writer, `7331 uploads and manages anonymous images on 7331.cloud.
 
 Usage:
   7331 [--server URL] upload [FILE...] [flags]
   7331 [--server URL] delete PUBLIC_ID|DELETION_URL [--yes] [--json]
   7331 [--server URL] info PUBLIC_ID|URL [--json]
-  7331 list [--json]
+  7331 list [--json] [--show-delete-url]
   7331 version
   7331 help
 
@@ -730,18 +817,21 @@ Run '7331 <command> --help' for command-specific flags.
 }
 
 func (app App) printUploadHelp() {
-	fmt.Fprint(app.Stdout, `Usage: 7331 upload [FILE...] [flags]
+	fmt.Fprintf(app.Stdout, `Usage: 7331 upload [FILE...] [flags]
 
 With no FILE arguments, an interactive terminal prompts you to drag and drop
 one to five images.
 
 Flags:
-  --expires DURATION    5m, 10m, 30m, 1h, 6h, 12h, or 24h (default 24h)
+  --expires DURATION    %s (default 24h)
   --json                Print a stable JSON envelope
   --url-only            Print direct URLs only
   --show-delete-url     Print the deletion capability URL
   --no-save             Do not save deletion credentials locally
-`)
+
+When stdout is not a terminal, deletion URLs requested by --show-delete-url or
+implied by --no-save are printed to stderr, keeping stdout a clean URL list.
+`, retentionList())
 }
 
 func (app App) printDeleteHelp() {

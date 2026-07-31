@@ -295,6 +295,20 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, body io.Re
 }
 
 func decodeProblem(response *http.Response) error {
+	// Redirects are never followed, because a redirected request would carry an
+	// upload ticket or deletion token to a host the user did not configure. The
+	// response body is not a problem document, so it is reported directly.
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		detail := "server redirected the request, which is not followed"
+		if location := response.Header.Get("Location"); location != "" {
+			detail = fmt.Sprintf("server redirected the request to %s; pass --server with that origin", location)
+		}
+		return &Error{Status: response.StatusCode, Problem: Problem{
+			Status: response.StatusCode,
+			Title:  http.StatusText(response.StatusCode),
+			Detail: detail,
+		}}
+	}
 	var details Problem
 	if err := decodeJSON(response.Body, &details); err != nil {
 		return &Error{Status: response.StatusCode, Problem: Problem{

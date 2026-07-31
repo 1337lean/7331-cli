@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 
 	"github.com/1337lean/7331-cli/internal/command"
+	"github.com/1337lean/7331-cli/internal/terminal"
 )
 
 var (
@@ -19,8 +20,8 @@ func main() {
 		Stdin:     os.Stdin,
 		Stdout:    os.Stdout,
 		Stderr:    os.Stderr,
-		StdinTTY:  isTerminal(os.Stdin),
-		StdoutTTY: isTerminal(os.Stdout),
+		StdinTTY:  terminal.IsTerminal(os.Stdin),
+		StdoutTTY: terminal.IsTerminal(os.Stdout),
 		Version:   resolvedVersion,
 		Commit:    resolvedCommit,
 		BuildDate: resolvedDate,
@@ -54,9 +55,4 @@ func build() (string, string, string) {
 		}
 	}
 	return resolved, resolvedCommit, resolvedDate
-}
-
-func isTerminal(file *os.File) bool {
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
